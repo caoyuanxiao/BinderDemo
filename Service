@@ -1,0 +1,200 @@
+onTransact 负责接受Client发送消息下来
+客户端发送消息下来
+@Override public int sayHello(int a, int b) throws android.os.RemoteException
+{
+android.os.Parcel _data = android.os.Parcel.obtain();
+android.os.Parcel _reply = android.os.Parcel.obtain();
+int _result;
+try {
+_data.writeInterfaceToken(DESCRIPTOR);
+_data.writeInt(a);   //_data用来发送数据到服务端
+_data.writeInt(b);
+mRemote.transact(Stub.TRANSACTION_sayHello, _data, _reply, 0);
+_reply.readException();  //_reply接受Service传递上来的消息
+_result = _reply.readInt();
+}
+finally {
+//清除数据
+_reply.recycle();
+_data.recycle();
+}
+return _result;
+}
+
+//服务端在onTransact方法中接受到消息
+case SAYHELLO: {    //收到HELLO命令的处理流程
+    printf("BnMyService:: got the client hello  SAYHELLO\n");
+    CHECK_INTERFACE(IMyService, data, reply);
+    uint32_t a=data.readInt32();//读取客户端发送来的数据
+    uint32_t b=data.readInt32();
+    printf("BnMyService:: SayHello a=%d b=%d\n",a,b);
+    const uint32_t ret=sayHello(a,b);
+    reply->writeNoException();
+    //必须在writeNoException 才能把数据传递到上层 否在无法接受到数据
+    //e:java.lang.RuntimeException: Unknown exception code: 7 msg null
+    reply->writeInt32(ret);
+    return NO_ERROR;
+}
+
+
+asInterface 获取远程的Binder对象mRemote mRemote.transact 发送消息到服务器
+
+在实现aidl文件中
+①Stub()构造方法：此方法调用了父类Binder的attachInterface()方法，将当前的Interface与Binder联系起来，由于传递了DESCRIPTOR这个参数，唯一标识了当前Interface。
+其实就是在C语言端 定义服务的宏  DECLARE_META_INTERFACE  绑定在一起
+IMPLEMENT_META_INTERFACE   会返回Bp服务  也就是客户端Binder对象
+
+https://www.cnblogs.com/cynchanpin/p/7127897.html  template使用方式
+
+IInterface.cpp   IInterface.h  framwork/native/include/binder/
+
+关于asBinder   服务端返回本身IInterface  也就是IMyService对象
+IBinder* BnInterface<INTERFACE>::onAsBinder()
+{
+    return this;
+}
+
+//这里获取的代理对象
+inline IBinder* BpInterface<INTERFACE>::onAsBinder()
+{
+    return remote();
+}
+
+//Binder.h文件
+inline  IBinder*        remote()                { return mRemote; }
+inline  IBinder*        remote() const          { return mRemote; }
+
+//base/core/java/android/os/ServiceManagerNative.java 这里会传递
+//在app端口执行了asInterface 或者有实现IMPLEMENT_META_INTERFACE mremote会被初始化  我们java端实现aidl文件其实是获取到代理对象 也是服务端 BnInterface
+static public IServiceManager asInterface(IBinder obj)
+{
+    if (obj == null) {
+        return null;
+    }
+    IServiceManager in =
+        (IServiceManager)obj.queryLocalInterface(descriptor);
+    if (in != null) {
+        return in;
+    }
+
+    return new ServiceManagerProxy(obj);
+
+    public ServiceManagerProxy(IBinder remote) {
+        mRemote = remote;
+    }
+}
+
+
+
+定义BpInterface 和 BnInterface
+template<typename INTERFACE>
+class BnInterface : public INTERFACE, public BBinder
+{
+public:
+    virtual sp<IInterface>      queryLocalInterface(const String16& _descriptor);
+    virtual const String16&     getInterfaceDescriptor() const;
+
+protected:
+    virtual IBinder*            onAsBinder();
+};
+
+// ----------------------------------------------------------------------
+
+template<typename INTERFACE>
+class BpInterface : public INTERFACE, public BpRefBase
+{
+public:
+                                BpInterface(const sp<IBinder>& remote);
+
+protected:
+    virtual IBinder*            onAsBinder();
+};
+
+在Binder.h文件中 有定义BBinder和BpRefBase
+需要注意的是
+transact
+linkToDeath
+unlinkToDeath
+onTransact    以上都在class BBinder内
+
+BpRefBase中有remote()  获取代理对象
+
+在Binder.cpp中  默认返回NULL   但是在IBinder 被继承会被替换 返回BnInterface
+sp<IInterface>  IBinder::queryLocalInterface(const String16& /*descriptor*/)
+{
+    return NULL;
+}
+
+BBinder数据
+class BBinder : public IBinder
+
+class DeathRecipient : public virtual RefBase
+{
+public:
+    virtual void binderDied(const wp<IBinder>& who) = 0;
+};
+
+
+
+//代码解析
+CHECK_INTERFACE(IMyService, data, reply);
+IInterface.h
+#define CHECK_INTERFACE(interface, data, reply)
+    if (!data.checkInterface(this)) { return PERMISSION_DENIED; }
+Parcel.cpp中
+bool Parcel::checkInterface(IBinder* binder) const
+{
+    return enforceInterface(binder->getInterfaceDescriptor());
+}
+检测是否是对应的IIterface 中getInterfaceDescriptor
+如果我们没有使用宏定义 我们可以自己定义 实现
+
+virtual const android::String16& getInterfaceDescriptor() const;
+static const android::String16 descriptor;
+
+enum{
+     //定义命令字段  这里顺序必须和app中的aidl文件对应
+     SAYHELLO=IBinder::FIRST_CALL_TRANSACTION+0,
+     SETCALLBACK=IBinder::FIRST_CALL_TRANSACTION+1,
+     ONHELLOCALLBACK=IBinder::FIRST_CALL_TRANSACTION+2,
+};
+这里定义的枚举必须和aidl文件中的函数方法顺序相同  否则只会按照顺序走
+
+2：关于BinderDead
+需要继承 public IBinder::DeathRecipient 里面包括 virtual定义的方法 必须实现
+
+Virtual关键字的函数就是虚拟函数 子类重写虚函数 可以对基类函数的覆盖(C++多态的体现)
+ 也就是java中 abstract函数  子类实现覆盖
+
+ IInterface::asBinder(callback)->linkToDeath(this);
+
+3：需要Write数据传递的时候 需要检测Token 类似CHECK_INTERFACE
+ _data.writeInterfaceToken(ICallback::getInterfaceDescriptor());
+
+ 4：remote()->transact(ONHELLOCALLBACK,_data,&_reply)
+ 最后传递下去的是 _reply的地址 传递消息
+
+
+服务addService逻辑
+class IServiceManager : public IInterface
+android::defaultServiceManager()  获取BpBinder  直接强转成IServiceManager
+
+
+
+
+
+
+
+
+
+
+
+ Binder服务计划
+ 1：先写出可用的服务 编译并且在手机上运行
+ 2:深入理解代码 基本逻辑 IITerface Binder IBinder BBinder Parcel BnInterface BpInterface 服务的addservice和getservice流程 深入Binder理解逻辑
+ 这里需要时间比较多  先最好笔记 最后写成博客
+ 3：添加服务相关权限 包括find权限 服务自启动权限等等。 这里需要写成博客 好好理解
+ 4: Binder驱动了解下   简单了解下
+ 5：Android.mk文件  MakeFile文件 语法了解下
+
+ 6：使用三星手机  Nexus6p 全职测试机
